@@ -94,7 +94,19 @@ read -p "Enter your choice (1-2): " choice
 case $choice in
     1)
         echo -e "${BLUE}Running interactive PWM configuration...${NC}"
-        $SUDO python3 "${INSTALL_PATH}" --configure
+        # Run configuration and capture the result
+        DETECTED_PWM=$($SUDO python3 "${INSTALL_PATH}" --configure 2>/dev/null | grep "SUCCESS\|manual override" | tail -1 | sed -n 's/.*: \(\/[^)]*\).*/\1/p')
+        
+        if [ -n "$DETECTED_PWM" ]; then
+            echo -e "${GREEN}Configuration completed. Detected PWM: ${DETECTED_PWM}${NC}"
+            echo -e "${YELLOW}Updating script configuration...${NC}"
+            
+            # Update the MANUAL_PWM_PATH in the installed script
+            $SUDO sed -i "s|^MANUAL_PWM_PATH = .*|MANUAL_PWM_PATH = '${DETECTED_PWM}'  # Auto-configured during installation|" "${INSTALL_PATH}"
+            echo -e "${GREEN}Script automatically configured with detected PWM path${NC}"
+        else
+            echo -e "${YELLOW}Configuration completed. Please verify the PWM path manually if needed.${NC}"
+        fi
         ;;
     2)
         echo -e "${YELLOW}Skipping configuration. You can configure later with:${NC}"

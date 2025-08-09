@@ -576,36 +576,69 @@ def configure_pwm_path():
     # Show available paths with context
     for i, path in enumerate(writable_pwm_paths, 1):
         hwmon_dir = os.path.dirname(path)
-        name_file = os.path.join(hwmon_dir, 'name')
-        hwmon_name = "unknown"
-        try:
-            with open(name_file, 'r') as f:
-                hwmon_name = f.read().strip()
-        except:
-            pass
+        hwmon_name = get_hwmon_device_name(hwmon_dir)
+        current_pwm = read_pwm_value(path) or 0
         
-        # Get current PWM value
-        current_pwm = "?"
-        try:
-            with open(path, 'r') as f:
-                current_pwm = f.read().strip()
-        except:
-            pass
+        # Get fan speed if available
+        pwm_name = os.path.basename(path)
+        fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
+        fan_speed = read_fan_speed(fan_input)
+        fan_info = f", Fan: {fan_speed} RPM" if fan_speed is not None else ""
         
-        print(f"  {i}. {path} (Device: {hwmon_name}, Current PWM: {current_pwm})")
+        print(f"  {i}. {path} (Device: {hwmon_name}, Current PWM: {current_pwm}{fan_info})")
+    
+    # Sort PWM paths by likelihood of being the main system fan
+    # Priority: pwm2 > pwm3 > pwm1 > others, and higher fan speeds first
+    def pwm_priority(path):
+        pwm_name = os.path.basename(path)
+        current_pwm = read_pwm_value(path) or 0
+        
+        # Get fan speed
+        hwmon_dir = os.path.dirname(path)
+        fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
+        fan_speed = read_fan_speed(fan_input) or 0
+        
+        # Priority scoring
+        priority = 0
+        
+        # PWM name priority (pwm2 is most common for CPU fans)
+        if pwm_name == 'pwm2':
+            priority += 1000
+        elif pwm_name == 'pwm3':
+            priority += 800
+        elif pwm_name == 'pwm1':
+            priority += 600
+            
+        # Higher fan speed suggests active fan
+        priority += fan_speed
+        
+        # Non-zero PWM value suggests active control
+        if current_pwm > 0:
+            priority += 100
+            
+        return priority
+    
+    # Sort by priority (highest first)
+    sorted_pwm_paths = sorted(writable_pwm_paths, key=pwm_priority, reverse=True)
+    
+    print(f"\nTesting in priority order (most likely system fan first):")
+    for i, path in enumerate(sorted_pwm_paths, 1):
+        pwm_name = os.path.basename(path)
+        print(f"  {i}. {pwm_name} - {path}")
     
     print("\n" + "="*60)
     print("INTERACTIVE FAN DETECTION")
     print("="*60)
     
-    # Test each PWM path interactively
+    # Test each PWM path interactively (in priority order)
     working_pwm = None
-    for i, path in enumerate(writable_pwm_paths, 1):
+    for i, path in enumerate(sorted_pwm_paths, 1):
         pwm_name = os.path.basename(path)
         hwmon_dir = os.path.dirname(path)
         fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
         
-        print(f"\nTesting PWM {i}/{len(writable_pwm_paths)}: {path}")
+        print(f"\nTesting PWM {i}/{len(sorted_pwm_paths)}: {path}")
+        print(f"PWM Name: {pwm_name} (common for: {'CPU fan' if pwm_name == 'pwm2' else 'system fan' if pwm_name in ['pwm1', 'pwm3'] else 'auxiliary fan'})")
         
         # Store original PWM value
         original_pwm = 0
@@ -618,7 +651,13 @@ def configure_pwm_path():
             continue
         
         # Ask if fan is currently running
-        current_status = input("Is your system fan currently running? (y/n): ").lower().strip()
+        print(f"\nCurrent PWM value: {original_pwm}")
+        if os.path.exists(fan_input):
+            current_fan_speed = read_fan_speed(fan_input)
+            if current_fan_speed:
+                print(f"Current fan speed: {current_fan_speed} RPM")
+        
+        current_status = input(f"Is your MAIN SYSTEM/CPU fan currently running? (y/n): ").lower().strip()
         
         if current_status == 'y':
             # Fan is running, try to stop it
@@ -653,10 +692,13 @@ def configure_pwm_path():
                             pass
                     
                     # Ask user if fan stopped (in case sensor doesn't work)
-                    stopped = input(f"Did the fan stop at PWM {stop_val}? (y/n): ").lower().strip()
+                    stopped = input(f"Did the MAIN SYSTEM/CPU fan stop at PWM {stop_val}? (y/n/skip): ").lower().strip()
                     if stopped == 'y':
-                        print(f"✓ Fan stops at PWM {stop_val}")
+                        print(f"✓ Main system fan stops at PWM {stop_val}")
                         fan_stopped = True
+                        break
+                    elif stopped == 'skip':
+                        print("Skipping this PWM - might control a different fan")
                         break
                     
                 except Exception as e:
@@ -710,10 +752,10 @@ def configure_pwm_path():
                     except:
                         pass
                 
-                started = input("Did the fan start running? (y/n): ").lower().strip()
+                started = input(f"Did the MAIN SYSTEM/CPU fan start running? (y/n/skip): ").lower().strip()
                 
                 if started == 'y':
-                    print("✓ This PWM controls your fan!")
+                    print("✓ This PWM controls your main system fan!")
                     working_pwm = path
                     
                     # Restore original value and break
@@ -721,8 +763,17 @@ def configure_pwm_path():
                     with open(path, 'w') as f:
                         f.write(str(original_pwm))
                     break
+                elif started == 'skip':
+                    print("Skipping this PWM - might control a different fan")
+                    # Restore and continue
+                    try:
+                        with open(path, 'w') as f:
+                            f.write(str(original_pwm))
+                    except:
+                        pass
+                    break
                 else:
-                    print("✗ This PWM doesn't control your fan.")
+                    print("✗ This PWM doesn't control your main system fan.")
                     
             except Exception as e:
                 print(f"Error testing PWM: {e}")
@@ -735,9 +786,10 @@ def configure_pwm_path():
                     pass
         
         # Ask if user wants to continue testing
-        if i < len(writable_pwm_paths):
-            continue_test = input("\nContinue testing other PWM paths? (y/n): ").lower().strip()
+        if i < len(sorted_pwm_paths) and working_pwm is None:
+            continue_test = input(f"\nContinue testing remaining PWM paths? (y/n): ").lower().strip()
             if continue_test != 'y':
+                print("Stopping PWM detection. You can manually specify the PWM path if you know it.")
                 break
     
     print("\n" + "="*60)
@@ -751,16 +803,30 @@ def configure_pwm_path():
         print("2. Find the line: MANUAL_PWM_PATH = ...")
         print(f"3. Change it to: MANUAL_PWM_PATH = '{working_pwm}'")
         print("\nAlternatively, you can use the command line option:")
-        print(f"   sudo python3 fan-control.py --pwm-path {working_pwm}")
+        print(f"   python3 fan-control.py --pwm-path {working_pwm}")
         print("\nTest your configuration with:")
-        print("   sudo python3 fan-control.py --test-fan")
+        print("   python3 fan-control.py --test-fan")
     else:
-        print("✗ No working PWM path found.")
-        print("This could mean:")
-        print("- Your fan is controlled differently")
-        print("- The fan control requires additional setup")
-        print("- The fan is controlled by BIOS/UEFI")
-        print("\nTry checking BIOS settings for fan control options.")
+        print("✗ No working PWM path found automatically.")
+        print("\nIf you know which PWM controls your main system fan, you can:")
+        print("1. Manually test PWM paths:")
+        
+        for path in sorted_pwm_paths[:3]:  # Show top 3 candidates
+            pwm_name = os.path.basename(path)
+            print(f"   # Test {pwm_name}: echo '100' > {path} && sleep 2 && echo '1' > {path}")
+        
+        print("\n2. Or specify it directly:")
+        print("   python3 fan-control.py --pwm-path /sys/class/hwmon/hwmon3/pwm2")
+        print("\n3. Or edit the script manually:")
+        print("   MANUAL_PWM_PATH = '/sys/class/hwmon/hwmon3/pwm2'")
+        
+        print("\nBased on your system, pwm2 is most likely your CPU fan.")
+        manual_override = input(f"\nWould you like to use pwm2 (/sys/class/hwmon/hwmon3/pwm2) as default? (y/n): ").lower().strip()
+        if manual_override == 'y':
+            working_pwm = '/sys/class/hwmon/hwmon3/pwm2'
+            print(f"✓ Using manual override: {working_pwm}")
+            
+    return working_pwm  # Return the selected path for the installer
 
 def show_system_info(pwm_path_override=None):
     """
