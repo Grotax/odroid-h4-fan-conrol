@@ -1,13 +1,31 @@
-# fan_control_script.py
+#!/usr/bin/env python3
+"""
+Odroid H4 Fan Control Script v2.0
 
-import subprocess
-import time
-import re
-import sys
-import os
-import glob
+Monitors CPU and HDD temperatures and automatically adjusts fan speed
+using incremental speed control for smooth operation.
 
-# fan_control_script.py
+Features:
+- Automatic PWM path detection with interactive configuration helper
+- CPU temperature monitoring via lm-sensors  
+- HDD temperature monitoring via smartctl
+- Incremental fan speed adjustment with hysteresis
+- Comprehensive logging with configurable levels
+- Manual PWM path override support
+
+Requirements:
+- Python 3.x
+- lm-sensors package (sensors command)
+- smartmontools package (smartctl command) 
+- it87 kernel module (for Odroid H4 and similar systems)
+- Root privileges for fan control
+
+Usage:
+    sudo python3 fan-control.py              # Normal operation
+    python3 fan-control.py --configure       # Interactive setup
+    sudo python3 fan-control.py --test-fan   # Test functionality
+    python3 fan-control.py --info            # System information
+"""
 
 import subprocess
 import time
@@ -19,10 +37,51 @@ import json
 import argparse
 import logging
 
+__version__ = "2.0"
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
-def setup_logging(debug=False):
+# --- Helper Functions ---
+
+def get_hwmon_device_name(hwmon_dir):
+    """Get the name of an hwmon device."""
+    name_file = os.path.join(hwmon_dir, 'name')
+    try:
+        with open(name_file, 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
+
+def read_pwm_value(pwm_path):
+    """Safely read a PWM value from a file."""
+    try:
+        with open(pwm_path, 'r') as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+def write_pwm_value(pwm_path, value):
+    """Safely write a PWM value to a file."""
+    try:
+        with open(pwm_path, 'w') as f:
+            f.write(str(value))
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to write PWM value {value} to {pwm_path}: {e}")
+        return False
+
+def read_fan_speed(fan_input_path):
+    """Safely read fan speed from a fan input file."""
+    if not os.path.exists(fan_input_path):
+        return None
+    try:
+        with open(fan_input_path, 'r') as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+def setup_logging(log_level='WARNING'):
     """Setup logging configuration."""
     # Create formatter
     formatter = logging.Formatter(
@@ -34,13 +93,12 @@ def setup_logging(debug=False):
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     
+    # Convert string level to logging constant
+    numeric_level = getattr(logging, log_level.upper(), logging.WARNING)
+    
     # Set log level
-    if debug:
-        logger.setLevel(logging.DEBUG)
-        console_handler.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.WARNING)
-        console_handler.setLevel(logging.WARNING)
+    logger.setLevel(numeric_level)
+    console_handler.setLevel(numeric_level)
     
     # Add handler to logger
     logger.addHandler(console_handler)
@@ -96,147 +154,85 @@ def check_kernel_module():
 def find_fan_control_path():
     """
     Dynamically finds the correct PWM control path for the fan.
-    For Odroid H4, pwm2 is typically the correct one, but we check for functionality.
     Returns the path if found, None otherwise.
     """
     logger.debug("Searching for fan control PWM paths...")
+    
     # Look for PWM controls in all hwmon directories - filter out auto config files
     all_pwm_paths = glob.glob('/sys/class/hwmon/hwmon*/pwm*')
-    # Filter to only include direct PWM control files (not auto_* configuration files)
     pwm_paths = [path for path in all_pwm_paths if '/pwm' in path and '_' not in os.path.basename(path)]
     logger.debug(f"Found direct PWM control paths: {pwm_paths}")
     
-    # For Odroid H4, pwm2 is typically the CPU fan, but systems may vary
+    if not pwm_paths:
+        logger.error("No PWM control paths found")
+        return None
+    
     # Prioritize based on known working configurations
     preferred_pwm_names = ['pwm2', 'pwm3', 'pwm1', 'pwm4', 'pwm5']
     
-    # First, try to find preferred PWM controls and test functionality
+    # Test each preferred PWM path
     for pwm_name in preferred_pwm_names:
         for path in pwm_paths:
-            if path.endswith(pwm_name):
-                logger.debug(f"Checking preferred PWM path: {path}")
+            if not path.endswith(pwm_name):
+                continue
                 
-                # Check if PWM is writable first
-                if not os.access(path, os.W_OK):
-                    logger.debug(f"PWM path {path} is not writable")
-                    continue
+            logger.debug(f"Checking preferred PWM path: {path}")
+            
+            # Check if PWM is writable
+            if not os.access(path, os.W_OK):
+                logger.debug(f"PWM path {path} is not writable")
+                continue
+            
+            hwmon_dir = os.path.dirname(path)
+            hwmon_name = get_hwmon_device_name(hwmon_dir)
+            current_pwm = read_pwm_value(path)
+            
+            if current_pwm is None:
+                logger.debug(f"Could not read PWM value from {path}")
+                continue
                 
-                # Get hwmon device name for context
-                hwmon_dir = os.path.dirname(path)
-                name_file = os.path.join(hwmon_dir, 'name')
-                hwmon_name = "unknown"
-                try:
-                    with open(name_file, 'r') as f:
-                        hwmon_name = f.read().strip()
-                        logger.debug(f"Hwmon device name: {hwmon_name}")
-                except Exception as e:
-                    logger.debug(f"Could not read hwmon name: {e}")
-                
-                # Try to read current PWM value
-                current_pwm = None
-                try:
-                    with open(path, 'r') as f:
-                        current_pwm = int(f.read().strip())
-                        logger.debug(f"Current PWM value at {path}: {current_pwm}")
-                except Exception as e:
-                    logger.debug(f"Could not read current PWM value from {path}: {e}")
-                    continue  # Skip this PWM if we can't read it
-                
-                # Check for fan speed sensor (optional - many systems don't have working fan sensors)
-                fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
-                current_fan_speed = None
-                if os.path.exists(fan_input):
-                    try:
-                        with open(fan_input, 'r') as f:
-                            current_fan_speed = int(f.read().strip())
-                            logger.debug(f"Fan speed sensor at {fan_input}: {current_fan_speed} RPM")
-                    except Exception as e:
-                        logger.debug(f"Could not read fan speed from {fan_input}: {e}")
-                else:
-                    logger.debug(f"No fan speed sensor found at {fan_input}")
-                
-                # Determine if this PWM is likely functional
-                pwm_functional = False
-                
-                # Priority 1: PWM has a non-zero value (indicates it's being used)
-                if current_pwm and current_pwm > 0:
-                    logger.debug(f"PWM is active with value {current_pwm} - likely functional")
-                    pwm_functional = True
-                
-                # Priority 2: Known good combinations for specific hardware (even if PWM is 0)
-                elif pwm_name in ['pwm2', 'pwm3'] and hwmon_name in ['it87', 'it8613', 'it8721']:
-                    logger.debug(f"Known good combination: {pwm_name} on {hwmon_name} - will test functionality")
-                    # For known good combinations, test if we can actually control the PWM
-                    try:
-                        # Try a small test write to see if it responds
-                        test_value = 10
-                        with open(path, 'w') as f:
-                            f.write(str(test_value))
-                        time.sleep(0.5)  # Brief delay for fan response
-                        
-                        # Check if fan speed changed
-                        if os.path.exists(fan_input):
-                            try:
-                                with open(fan_input, 'r') as f:
-                                    test_fan_speed = int(f.read().strip())
-                                if test_fan_speed > 0:
-                                    logger.debug(f"PWM test successful - fan responded with {test_fan_speed} RPM")
-                                    pwm_functional = True
-                                    # Restore original PWM value
-                                    with open(path, 'w') as f:
-                                        f.write(str(current_pwm))
-                                else:
-                                    logger.debug(f"PWM test - fan didn't respond (still 0 RPM)")
-                            except Exception as e:
-                                logger.debug(f"Could not read fan speed during test: {e}")
-                        
-                        if not pwm_functional:
-                            # Restore original value even if test failed
-                            with open(path, 'w') as f:
-                                f.write(str(current_pwm))
-                            # Still consider it functional for known good combinations
-                            pwm_functional = True
-                            logger.debug(f"Known good PWM combination {pwm_name} on {hwmon_name} - assuming functional")
-                            
-                    except Exception as e:
-                        logger.debug(f"PWM functionality test failed: {e}")
-                        # For known combinations, still assume functional even if test fails
-                        pwm_functional = True
-                
-                # Priority 3: Fan speed sensor shows activity
-                elif current_fan_speed and current_fan_speed > 0:
-                    logger.debug(f"Fan sensor shows {current_fan_speed} RPM - PWM likely functional")
-                    pwm_functional = True
-                
-                if pwm_functional:
-                    logger.info(f"Selected fan control path: {path} (hwmon: {hwmon_name}, PWM: {pwm_name})")
-                    if current_fan_speed:
-                        logger.info(f"Fan currently running at {current_fan_speed} RPM")
-                    elif current_pwm:
-                        logger.info(f"PWM currently set to {current_pwm}")
-                    return path
-                else:
-                    logger.debug(f"PWM {path} doesn't appear to be actively used (PWM={current_pwm})")
+            logger.debug(f"Hwmon device: {hwmon_name}, Current PWM: {current_pwm}")
+            
+            # Check for fan speed sensor (optional)
+            fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
+            current_fan_speed = read_fan_speed(fan_input)
+            
+            if current_fan_speed is not None:
+                logger.debug(f"Fan speed sensor: {current_fan_speed} RPM")
+            
+            # Determine if this PWM is likely functional
+            is_functional = False
+            
+            # Priority 1: PWM has a non-zero value (indicates active use)
+            if current_pwm > 0:
+                logger.debug(f"PWM is active with value {current_pwm}")
+                is_functional = True
+            
+            # Priority 2: Known good combinations for specific hardware
+            elif pwm_name in ['pwm2', 'pwm3'] and hwmon_name in ['it87', 'it8613', 'it8721']:
+                logger.debug(f"Known good combination: {pwm_name} on {hwmon_name}")
+                is_functional = True
+            
+            # Priority 3: Fan speed sensor shows activity
+            elif current_fan_speed and current_fan_speed > 0:
+                logger.debug(f"Fan sensor shows activity: {current_fan_speed} RPM")
+                is_functional = True
+            
+            if is_functional:
+                logger.info(f"Selected fan control path: {path} (device: {hwmon_name})")
+                if current_fan_speed:
+                    logger.info(f"Fan currently at {current_fan_speed} RPM")
+                return path
+            else:
+                logger.debug(f"PWM {path} doesn't appear to be actively used")
     
-    # If no preferred PWM found with active fan, try any writable PWM as fallback
-    logger.debug("No clearly functional PWM found, trying any writable PWM control...")
+    # Fallback: try any writable PWM as last resort
+    logger.debug("No clearly functional PWM found, trying fallback...")
     for path in pwm_paths:
         if os.access(path, os.W_OK):
-            logger.debug(f"Fallback: checking PWM path: {path}")
-            hwmon_dir = os.path.dirname(path)
-            name_file = os.path.join(hwmon_dir, 'name')
-            
-            try:
-                with open(name_file, 'r') as f:
-                    hwmon_name = f.read().strip()
-                    logger.debug(f"Hwmon device name: {hwmon_name}")
-                    
-                logger.warning(f"Using fallback fan control path: {path} (hwmon: {hwmon_name})")
-                return path
-            except Exception as e:
-                logger.debug(f"Could not read hwmon name: {e}")
-                logger.warning(f"Using fallback fan control path: {path}")
-                return path
+            hwmon_name = get_hwmon_device_name(os.path.dirname(path))
+            logger.warning(f"Using fallback PWM path: {path} (device: {hwmon_name})")
+            return path
     
     logger.error("No writable PWM control path found")
     return None
@@ -427,44 +423,94 @@ def calculate_fan_speed(current_temp, previous_speed=None):
 def set_fan_speed(speed, pwm_path_override=None):
     """
     Sets the fan speed by writing a value to the control file.
-    This usually requires root privileges.
-    """
-    logger.debug(f"Attempting to set fan speed to: {speed}")
+    Requires root privileges.
     
-    # Priority: command line override, then manual config, then auto-detection
+    Args:
+        speed: PWM value (0-255)
+        pwm_path_override: Optional PWM path override
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    logger.debug(f"Setting fan speed to: {speed}")
+    
+    # Determine PWM path priority: CLI override > manual config > auto-detection
     if pwm_path_override:
         fan_control_path = pwm_path_override
-        logger.debug(f"Using command-line override PWM path: {fan_control_path}")
+        logger.debug(f"Using command-line PWM path: {fan_control_path}")
     elif MANUAL_PWM_PATH:
         fan_control_path = MANUAL_PWM_PATH
-        logger.debug(f"Using manually configured PWM path: {fan_control_path}")
+        logger.debug(f"Using configured PWM path: {fan_control_path}")
     else:
         fan_control_path = find_fan_control_path()
+        if not fan_control_path:
+            logger.error("No PWM control path found")
+            return False
     
-    if not fan_control_path:
-        logger.error("No writable fan control path found")
-        return False
-        
-    try:
-        logger.debug(f"Writing speed {speed} to {fan_control_path}")
-        with open(fan_control_path, 'w') as f:
-            f.write(str(speed))
+    # Validate speed range
+    speed = max(0, min(255, int(speed)))
+    
+    # Write PWM value
+    if write_pwm_value(fan_control_path, speed):
         logger.info(f"Set fan speed to {speed} via {fan_control_path}")
-        logger.debug(f"Successfully set fan speed to {speed}")
         return True
-    except IOError as e:
-        logger.debug(f"Failed to write to fan control file: {e}")
-        logger.error(f"Error setting fan speed: {e}. Are you running as root?")
+    else:
+        logger.error(f"Failed to set fan speed. Check permissions and PWM path.")
         return False
+
+def show_status():
+    """Show current temperature and fan status in a concise format."""
+    print("=== Current Status ===")
+    
+    # CPU temperature
+    cpu_temp = get_cpu_temp()
+    cpu_status = f"{cpu_temp}°C" if cpu_temp else "Not available"
+    print(f"CPU Temperature: {cpu_status}")
+    
+    # Drive temperatures  
+    drives = discover_drives()
+    if drives:
+        max_drive_temp = 0
+        for drive in drives:
+            temp = get_hdd_temp(drive)
+            if temp and temp > max_drive_temp:
+                max_drive_temp = temp
+        if max_drive_temp > 0:
+            print(f"Max Drive Temperature: {max_drive_temp}°C")
+    
+    # Current fan speed and PWM
+    pwm_path = MANUAL_PWM_PATH or find_fan_control_path()
+    if pwm_path:
+        current_pwm = read_pwm_value(pwm_path)
+        pwm_name = os.path.basename(pwm_path)
+        fan_input = os.path.join(os.path.dirname(pwm_path), 
+                                pwm_name.replace('pwm', 'fan') + '_input')
+        fan_speed = read_fan_speed(fan_input)
+        
+        print(f"PWM Path: {pwm_path}")
+        print(f"Current PWM Value: {current_pwm}")
+        if fan_speed is not None:
+            print(f"Fan Speed: {fan_speed} RPM")
+        else:
+            print("Fan Speed: Not available")
+    else:
+        print("PWM Path: Not found")
 
 def configure_pwm_path():
     """
     Interactive helper to find and configure the correct PWM path.
     """
-    print("=== PWM Configuration Helper ===")
-    print("This will help you find the correct PWM path for your system.\n")
+    print("=== Interactive PWM Configuration Helper ===")
+    print("This will help you identify the correct PWM path for your fan control.")
+    print("We'll test each PWM path to see which one controls your fan.\n")
     
-    # Show all available PWM paths
+    # Ensure we're running as root
+    if os.geteuid() != 0:
+        print("ERROR: This configuration helper requires root privileges.")
+        print("Please run: sudo python3 fan-control.py --configure")
+        return
+    
+    # Find all direct PWM control paths
     all_pwm_paths = glob.glob('/sys/class/hwmon/hwmon*/pwm*')
     pwm_paths = [path for path in all_pwm_paths if '/pwm' in path and '_' not in os.path.basename(path)]
     
@@ -472,8 +518,18 @@ def configure_pwm_path():
         print("ERROR: No PWM control paths found!")
         return
     
-    print(f"Found {len(pwm_paths)} PWM control path(s):")
-    for i, path in enumerate(pwm_paths, 1):
+    # Filter to only writable paths
+    writable_pwm_paths = [path for path in pwm_paths if os.access(path, os.W_OK)]
+    
+    if not writable_pwm_paths:
+        print("ERROR: No writable PWM control paths found!")
+        print("Make sure you're running as root.")
+        return
+    
+    print(f"Found {len(writable_pwm_paths)} writable PWM control path(s):")
+    
+    # Show available paths with context
+    for i, path in enumerate(writable_pwm_paths, 1):
         hwmon_dir = os.path.dirname(path)
         name_file = os.path.join(hwmon_dir, 'name')
         hwmon_name = "unknown"
@@ -483,9 +539,6 @@ def configure_pwm_path():
         except:
             pass
         
-        # Check if writable
-        writable = "✓" if os.access(path, os.W_OK) else "✗ (requires root)"
-        
         # Get current PWM value
         current_pwm = "?"
         try:
@@ -494,14 +547,140 @@ def configure_pwm_path():
         except:
             pass
         
-        print(f"  {i}. {path}")
-        print(f"     Device: {hwmon_name}, Writable: {writable}, Current PWM: {current_pwm}")
+        print(f"  {i}. {path} (Device: {hwmon_name}, Current PWM: {current_pwm})")
     
-    print("\nTo configure manually, edit the script and set:")
-    print("MANUAL_PWM_PATH = 'YOUR_CHOSEN_PATH'")
-    print("\nFor your system, based on the debug output, try:")
-    print("MANUAL_PWM_PATH = '/sys/class/hwmon/hwmon3/pwm3'")
-    print("\nAfter editing, test with: sudo python3 fan-control.py --test-fan")
+    print("\n" + "="*60)
+    print("INTERACTIVE FAN DETECTION")
+    print("="*60)
+    
+    # Test each PWM path interactively
+    working_pwm = None
+    for i, path in enumerate(writable_pwm_paths, 1):
+        pwm_name = os.path.basename(path)
+        hwmon_dir = os.path.dirname(path)
+        fan_input = os.path.join(hwmon_dir, pwm_name.replace('pwm', 'fan') + '_input')
+        
+        print(f"\nTesting PWM {i}/{len(writable_pwm_paths)}: {path}")
+        
+        # Store original PWM value
+        original_pwm = 0
+        try:
+            with open(path, 'r') as f:
+                original_pwm = int(f.read().strip())
+            print(f"Original PWM value: {original_pwm}")
+        except Exception as e:
+            print(f"Could not read original PWM value: {e}")
+            continue
+        
+        # Ask if fan is currently running
+        current_status = input("Is your system fan currently running? (y/n): ").lower().strip()
+        
+        if current_status == 'y':
+            # Fan is running, try to stop it
+            print("Setting PWM to 0 to stop the fan...")
+            try:
+                with open(path, 'w') as f:
+                    f.write('0')
+                
+                print("Waiting 3 seconds for fan to stop...")
+                time.sleep(3)
+                
+                stopped = input("Did the fan stop? (y/n): ").lower().strip()
+                
+                if stopped == 'y':
+                    print("✓ This PWM controls your fan!")
+                    working_pwm = path
+                    
+                    # Restore original value and break
+                    print("Restoring original fan speed...")
+                    with open(path, 'w') as f:
+                        f.write(str(original_pwm))
+                    break
+                else:
+                    print("✗ This PWM doesn't control your fan.")
+                    
+            except Exception as e:
+                print(f"Error testing PWM: {e}")
+            finally:
+                # Always restore original value
+                try:
+                    with open(path, 'w') as f:
+                        f.write(str(original_pwm))
+                except:
+                    pass
+        
+        else:
+            # Fan is not running, try to start it
+            print("Setting PWM to 150 to start the fan...")
+            try:
+                with open(path, 'w') as f:
+                    f.write('150')
+                
+                print("Waiting 3 seconds for fan to spin up...")
+                time.sleep(3)
+                
+                # Check fan speed sensor if available
+                fan_speed = None
+                if os.path.exists(fan_input):
+                    try:
+                        with open(fan_input, 'r') as f:
+                            fan_speed = int(f.read().strip())
+                        if fan_speed > 0:
+                            print(f"Fan speed sensor shows: {fan_speed} RPM")
+                    except:
+                        pass
+                
+                started = input("Did the fan start running? (y/n): ").lower().strip()
+                
+                if started == 'y':
+                    print("✓ This PWM controls your fan!")
+                    working_pwm = path
+                    
+                    # Restore original value and break
+                    print("Restoring original fan speed...")
+                    with open(path, 'w') as f:
+                        f.write(str(original_pwm))
+                    break
+                else:
+                    print("✗ This PWM doesn't control your fan.")
+                    
+            except Exception as e:
+                print(f"Error testing PWM: {e}")
+            finally:
+                # Always restore original value
+                try:
+                    with open(path, 'w') as f:
+                        f.write(str(original_pwm))
+                except:
+                    pass
+        
+        # Ask if user wants to continue testing
+        if i < len(writable_pwm_paths):
+            continue_test = input("\nContinue testing other PWM paths? (y/n): ").lower().strip()
+            if continue_test != 'y':
+                break
+    
+    print("\n" + "="*60)
+    print("CONFIGURATION RESULTS")
+    print("="*60)
+    
+    if working_pwm:
+        print(f"✓ SUCCESS: Found working PWM path: {working_pwm}")
+        print("\nTo configure the script permanently:")
+        print("1. Edit the fan-control.py file")
+        print("2. Find the line: MANUAL_PWM_PATH = ...")
+        print(f"3. Change it to: MANUAL_PWM_PATH = '{working_pwm}'")
+        print("\nAlternatively, you can use the command line option:")
+        print(f"   sudo python3 fan-control.py --pwm-path {working_pwm}")
+        print("\nTest your configuration with:")
+        print("   sudo python3 fan-control.py --test-fan")
+    else:
+        print("✗ No working PWM path found.")
+        print("This could mean:")
+        print("- Your fan is controlled differently")
+        print("- The fan control requires additional setup")
+        print("- The fan is controlled by BIOS/UEFI")
+        print("\nTry checking BIOS settings for fan control options.")
 
 def show_system_info(pwm_path_override=None):
     """
@@ -708,23 +887,30 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sudo python3 fan-control.py                    # Run with auto-detection
-  sudo python3 fan-control.py --debug            # Run with debug output
-  sudo python3 fan-control.py --pwm-path /sys/class/hwmon/hwmon3/pwm3  # Force specific PWM
-  sudo python3 fan-control.py --test-fan         # Test fan control and exit
-  sudo python3 fan-control.py --info             # Show system info and exit
+  sudo ./fan-control.py                       # Run with auto-detection
+  sudo ./fan-control.py --log-level INFO      # Run with info-level logging
+  sudo ./fan-control.py --pwm-path /sys/class/hwmon/hwmon3/pwm2  # Force specific PWM
+  sudo ./fan-control.py --test-fan            # Test fan control and exit
+  ./fan-control.py --info                     # Show detailed system info
+  ./fan-control.py --status                   # Show current temperature/fan status
+  sudo ./fan-control.py --configure           # Interactive PWM configuration
   
 Configuration:
-  For systems where auto-detection doesn't work, you can manually specify the PWM path
-  by editing the MANUAL_PWM_PATH variable at the top of this script.
+  1. Use --configure for interactive PWM path discovery (recommended)
+  2. Or manually edit MANUAL_PWM_PATH in the script
+  3. Or use --pwm-path for one-time override
   
-  Example: MANUAL_PWM_PATH = '/sys/class/hwmon/hwmon3/pwm3'
+  Example: MANUAL_PWM_PATH = '/sys/class/hwmon/hwmon3/pwm2'
   
 Temperature thresholds can be adjusted by editing the script configuration section.
         """
     )
+    parser.add_argument('--version', action='version', version=f'Fan Control Script v{__version__}')
     parser.add_argument('--debug', '-d', action='store_true', 
-                       help='Enable debug output')
+                       help='Enable debug output (equivalent to --log-level DEBUG)')
+    parser.add_argument('--log-level', type=str, default='WARNING',
+                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], 
+                       help='Set logging level (DEBUG, INFO, WARNING, ERROR)')
     parser.add_argument('--pwm-path', type=str,
                        help='Force specific PWM control path (e.g., /sys/class/hwmon/hwmon3/pwm2)')
     parser.add_argument('--test-fan', action='store_true',
@@ -733,23 +919,33 @@ Temperature thresholds can be adjusted by editing the script configuration secti
                        help='Show system information (temperatures, fans, drives) and exit')
     parser.add_argument('--configure', action='store_true',
                        help='Interactive configuration helper to find the correct PWM path')
+    parser.add_argument('--status', action='store_true',
+                       help='Show current temperature and fan status')
     
     args = parser.parse_args()
     
-    # Set up logging
-    setup_logging(debug=args.debug)
+    # Handle log level - debug flag overrides log-level
+    log_level = 'DEBUG' if args.debug else args.log_level
     
-    if args.debug:
+    # Set up logging
+    setup_logging(log_level=log_level)
+    
+    if args.debug or log_level == 'DEBUG':
         logger.info("Debug mode enabled")
         logger.debug("Starting in debug mode...")
     
     # Ensure the script is run with root privileges for fan control
-    if not args.info and os.geteuid() != 0:
+    if not args.info and not args.configure and not args.status and os.geteuid() != 0:
         logger.error("This script must be run as root for fan control. Please use 'sudo python3 fan-control.py'.")
-        logger.error("Use --info flag to run without root privileges for system information only.")
+        logger.error("Use --info, --status, or --configure flags to run without root privileges for information only.")
         sys.exit(1)
     
     logger.debug("Script starting with appropriate privileges")
+    
+    # Handle status mode
+    if args.status:
+        show_status()
+        sys.exit(0)
     
     # Handle info mode
     if args.info:
