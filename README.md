@@ -34,7 +34,7 @@ Advanced fan control script for Odroid H4 and similar systems with automatic tem
    ./install.sh
    ```
 
-The installation script will automatically:
+The installation script works with both regular users (using sudo when needed) and root users (common on server systems like Proxmox). It will automatically:
 - Install required dependencies
 - Load and configure kernel modules  
 - Test the fan control functionality
@@ -395,12 +395,15 @@ sudo systemd-analyze verify /etc/systemd/system/odroid-fan-control.service
 
 Tested on:
 - Odroid H4 with it8613 sensor chip
+- Proxmox VE hosts (root-only environments)
 - Similar systems using it87 family sensors
 
 Should work on any system with:
 - PWM-controllable fans
 - Hardware monitoring via hwmon interface
 - Compatible sensor chips (it87 family)
+
+**Note for Proxmox Users**: The installation scripts automatically detect if you're running as root (common on Proxmox hosts) and work without requiring sudo.
 
 ## License
 

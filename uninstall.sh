@@ -23,9 +23,11 @@ echo "============================================"
 
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
-   echo -e "${RED}Error: Do not run this script as root${NC}"
-   echo "Run as regular user with sudo when prompted"
-   exit 1
+   echo -e "${YELLOW}Running as root user${NC}"
+   SUDO=""
+else
+   echo -e "${YELLOW}Running as regular user (will use sudo when needed)${NC}"
+   SUDO="sudo"
 fi
 
 echo -e "${YELLOW}This will remove the Odroid H4 fan control service and script.${NC}"
@@ -39,19 +41,19 @@ fi
 echo -e "${YELLOW}Step 1: Stopping and disabling service...${NC}"
 # Stop service if running
 if systemctl is-active --quiet "${SERVICE_NAME}"; then
-    sudo systemctl stop "${SERVICE_NAME}"
+    $SUDO systemctl stop "${SERVICE_NAME}"
     echo -e "${GREEN}Service stopped${NC}"
 fi
 
 # Disable service if enabled
 if systemctl is-enabled --quiet "${SERVICE_NAME}"; then
-    sudo systemctl disable "${SERVICE_NAME}"
+    $SUDO systemctl disable "${SERVICE_NAME}"
     echo -e "${GREEN}Service disabled${NC}"
 fi
 
 echo -e "${YELLOW}Step 2: Removing service file...${NC}"
 if [[ -f "${SERVICE_PATH}" ]]; then
-    sudo rm "${SERVICE_PATH}"
+    $SUDO rm "${SERVICE_PATH}"
     echo -e "${GREEN}Removed ${SERVICE_PATH}${NC}"
 else
     echo -e "${YELLOW}Service file not found${NC}"
@@ -59,15 +61,15 @@ fi
 
 echo -e "${YELLOW}Step 3: Removing script...${NC}"
 if [[ -f "${INSTALL_PATH}" ]]; then
-    sudo rm "${INSTALL_PATH}"
+    $SUDO rm "${INSTALL_PATH}"
     echo -e "${GREEN}Removed ${INSTALL_PATH}${NC}"
 else
     echo -e "${YELLOW}Script file not found${NC}"
 fi
 
 echo -e "${YELLOW}Step 4: Reloading systemd configuration...${NC}"
-sudo systemctl daemon-reload
-sudo systemctl reset-failed
+$SUDO systemctl daemon-reload
+$SUDO systemctl reset-failed
 echo -e "${GREEN}Systemd configuration reloaded${NC}"
 
 echo -e "${YELLOW}Step 5: Optional cleanup...${NC}"
@@ -81,7 +83,7 @@ echo ""
 read -p "Remove it87 from /etc/modules? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    sudo sed -i '/^it87$/d' /etc/modules
+    $SUDO sed -i '/^it87$/d' /etc/modules
     echo -e "${GREEN}Removed it87 from /etc/modules${NC}"
     echo -e "${YELLOW}Note: it87 module will remain loaded until next reboot${NC}"
 fi
