@@ -798,10 +798,35 @@ def configure_pwm_path():
     
     if working_pwm:
         print(f"✓ SUCCESS: Found working PWM path: {working_pwm}")
-        print("\nTo configure the script permanently:")
-        print("1. Edit the fan-control.py file")
-        print("2. Find the line: MANUAL_PWM_PATH = ...")
-        print(f"3. Change it to: MANUAL_PWM_PATH = '{working_pwm}'")
+        
+        # Update the script file automatically if we found a working PWM
+        script_path = __file__
+        try:
+            # Read current script content
+            with open(script_path, 'r') as f:
+                content = f.read()
+            
+            # Update MANUAL_PWM_PATH
+            import re
+            updated_content = re.sub(
+                r'^MANUAL_PWM_PATH = .*$',
+                f"MANUAL_PWM_PATH = '{working_pwm}'  # Auto-configured",
+                content,
+                flags=re.MULTILINE
+            )
+            
+            # Write back to script
+            with open(script_path, 'w') as f:
+                f.write(updated_content)
+            print(f"✓ Script automatically updated with PWM path: {working_pwm}")
+            
+        except Exception as e:
+            print(f"Could not auto-update script: {e}")
+            print("\nTo configure the script manually:")
+            print("1. Edit the fan-control.py file")
+            print("2. Find the line: MANUAL_PWM_PATH = ...")
+            print(f"3. Change it to: MANUAL_PWM_PATH = '{working_pwm}'")
+        
         print("\nAlternatively, you can use the command line option:")
         print(f"   python3 fan-control.py --pwm-path {working_pwm}")
         print("\nTest your configuration with:")
