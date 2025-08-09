@@ -1,0 +1,39 @@
+[Unit]
+Description=Odroid H4 Fan Control Service
+Documentation=https://github.com/Grotax/odroid-h4-fan-control
+After=multi-user.target
+Wants=lm-sensors.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fan-control.py --log-level INFO
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+User=root
+Group=root
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/sys/class/hwmon
+PrivateTmp=true
+PrivateDevices=false
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=false
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+MemoryDenyWriteExecute=true
+
+# Resource limits
+MemoryMax=64M
+CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target

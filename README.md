@@ -21,11 +21,33 @@ Advanced fan control script for Odroid H4 and similar systems with automatic tem
 
 ## Installation
 
+### Quick Install (Recommended)
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Grotax/odroid-h4-fan-control.git
+   cd odroid-h4-fan-control
+   ```
+
+2. Run the installation script:
+   ```bash
+   ./install.sh
+   ```
+
+The installation script will automatically:
+- Install required dependencies
+- Load and configure kernel modules  
+- Test the fan control functionality
+- Set up the systemd service
+- Guide you through PWM configuration
+- Start the service
+
+### Manual Installation
+
 1. Clone or download the script:
    ```bash
-   wget https://raw.githubusercontent.com/your-repo/fan-control.py
-   # or
-   git clone https://github.com/your-repo/odroid-h4-fan-control.git
+   git clone https://github.com/Grotax/odroid-h4-fan-control.git
+   # or download individual files
    ```
 
 2. Make it executable:
@@ -39,6 +61,20 @@ Advanced fan control script for Odroid H4 and similar systems with automatic tem
    sudo apt install lm-sensors smartmontools
    sudo modprobe it87  # Load kernel module
    ```
+
+### Uninstallation
+
+To completely remove the fan control service:
+
+```bash
+./uninstall.sh
+```
+
+This will:
+- Stop and disable the systemd service
+- Remove the service file and script
+- Clean up systemd configuration
+- Optionally remove kernel module configuration
 
 ## Quick Start
 
@@ -122,33 +158,144 @@ FAN_SPEED_MAX = 255    # Maximum fan speed
 
 ## Running as a Service
 
-Create a systemd service file:
+### Automatic Installation (Recommended)
+
+Use the provided installation script for easy setup:
 
 ```bash
-sudo nano /etc/systemd/system/fan-control.service
+./install.sh
 ```
 
-```ini
-[Unit]
-Description=Odroid H4 Fan Control
-After=multi-user.target
+This script will:
+1. Install required dependencies (lm-sensors, smartmontools)
+2. Load and configure the it87 kernel module
+3. Test the fan control script
+4. Install the script to `/usr/local/bin/`
+5. Set up the systemd service
+6. Guide you through PWM configuration
+7. Enable and start the service
 
-[Service]
-Type=simple
-ExecStart=/path/to/fan-control.py --log-level INFO
-Restart=always
-RestartSec=10
-User=root
+### Manual Installation
 
-[Install]
-WantedBy=multi-user.target
-```
+#### 1. Install the Script and Service
 
-Enable and start:
 ```bash
+# Copy script to system location
+sudo cp fan-control.py /usr/local/bin/
+sudo chmod 755 /usr/local/bin/fan-control.py
+
+# Install service file
+sudo cp odroid-fan-control.service /etc/systemd/system/
+sudo chmod 644 /etc/systemd/system/odroid-fan-control.service
+```
+
+#### 2. Configure PWM Path
+
+```bash
+# Run interactive configuration
+sudo /usr/local/bin/fan-control.py --configure
+
+# Or edit the script manually
+sudo nano /usr/local/bin/fan-control.py
+# Set: MANUAL_PWM_PATH = '/sys/class/hwmon/hwmon3/pwm2'
+```
+
+#### 3. Enable and Start Service
+
+```bash
+# Reload systemd configuration
 sudo systemctl daemon-reload
-sudo systemctl enable fan-control.service
-sudo systemctl start fan-control.service
+
+# Enable service (start automatically on boot)
+sudo systemctl enable odroid-fan-control
+
+# Start service now
+sudo systemctl start odroid-fan-control
+```
+
+### Service Management
+
+#### Basic Commands
+```bash
+# Check service status
+sudo systemctl status odroid-fan-control
+
+# Start service
+sudo systemctl start odroid-fan-control
+
+# Stop service
+sudo systemctl stop odroid-fan-control
+
+# Restart service
+sudo systemctl restart odroid-fan-control
+
+# Enable autostart on boot
+sudo systemctl enable odroid-fan-control
+
+# Disable autostart
+sudo systemctl disable odroid-fan-control
+```
+
+#### Viewing Logs
+```bash
+# View recent logs
+sudo journalctl -u odroid-fan-control
+
+# Follow logs in real-time
+sudo journalctl -u odroid-fan-control -f
+
+# View logs from last boot
+sudo journalctl -u odroid-fan-control -b
+
+# View logs with timestamps
+sudo journalctl -u odroid-fan-control --since "1 hour ago"
+```
+
+#### Configuration Changes
+After modifying the script configuration:
+```bash
+# Restart the service to apply changes
+sudo systemctl restart odroid-fan-control
+
+# Check if service is running properly
+sudo systemctl status odroid-fan-control
+```
+
+### Service Features
+
+The systemd service includes:
+- **Automatic restart**: Service restarts if it crashes
+- **Boot integration**: Starts automatically after system boot
+- **Security hardening**: Runs with minimal privileges
+- **Resource limits**: Memory and CPU usage constraints
+- **Dependency management**: Waits for required services
+- **Proper logging**: Integrates with systemd journal
+
+### Service Security
+
+The service file includes security hardening:
+- `NoNewPrivileges=true`: Cannot gain new privileges
+- `ProtectSystem=strict`: Read-only access to most system files
+- `ProtectHome=true`: No access to user home directories
+- `ReadWritePaths=/sys/class/hwmon`: Only hwmon access allowed
+- `MemoryMax=64M`: Memory usage limit
+- `CPUQuota=10%`: CPU usage limit
+
+### Uninstalling the Service
+
+```bash
+# Stop and disable service
+sudo systemctl stop odroid-fan-control
+sudo systemctl disable odroid-fan-control
+
+# Remove service file
+sudo rm /etc/systemd/system/odroid-fan-control.service
+
+# Remove script
+sudo rm /usr/local/bin/fan-control.py
+
+# Reload systemd
+sudo systemctl daemon-reload
 ```
 
 ## Troubleshooting
@@ -168,10 +315,80 @@ sudo systemctl start fan-control.service
 - Run sensors-detect: `sudo sensors-detect`
 - For HDD temperatures, install smartmontools: `sudo apt install smartmontools`
 
+### Service Issues
+
+#### Service Won't Start
+```bash
+# Check service status for errors
+sudo systemctl status odroid-fan-control
+
+# Check detailed logs
+sudo journalctl -u odroid-fan-control --no-pager
+
+# Check if script is executable and in correct location
+ls -la /usr/local/bin/fan-control.py
+
+# Test script manually
+sudo /usr/local/bin/fan-control.py --status
+```
+
+#### Service Keeps Restarting
+```bash
+# Check logs for error messages
+sudo journalctl -u odroid-fan-control -f
+
+# Common issues:
+# - PWM path not configured correctly
+# - Missing kernel module (it87)
+# - Hardware not supported
+# - Script syntax errors
+```
+
+#### High CPU Usage
+```bash
+# Check if debug logging is enabled (causes high log volume)
+sudo journalctl -u odroid-fan-control | grep DEBUG
+
+# Service is configured with 10% CPU quota limit
+# Check resource usage:
+sudo systemctl show odroid-fan-control --property=CPUUsageNSec
+```
+
+#### Memory Issues
+```bash
+# Service has 64MB memory limit
+# Check memory usage:
+sudo systemctl show odroid-fan-control --property=MemoryCurrent
+```
+
+#### Service Logs
+```bash
+# View all logs
+sudo journalctl -u odroid-fan-control
+
+# View errors only
+sudo journalctl -u odroid-fan-control -p err
+
+# Clear old logs (if disk space is an issue)
+sudo journalctl --vacuum-time=7d
+```
+
 ### Debug Information
 Run with debug logging to see detailed information:
 ```bash
 sudo ./fan-control.py --debug --info
+```
+
+### Testing Service Configuration
+```bash
+# Test script before installing as service
+sudo ./fan-control.py --test-fan
+
+# Check systemd service file syntax
+sudo systemctl cat odroid-fan-control
+
+# Validate service file
+sudo systemd-analyze verify /etc/systemd/system/odroid-fan-control.service
 ```
 
 ## Hardware Support
