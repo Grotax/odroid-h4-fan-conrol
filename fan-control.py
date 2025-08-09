@@ -114,6 +114,8 @@ TEMP_TARGET = 50       # Target temperature to maintain
 
 # Fan speed configuration (0-255 PWM values)
 FAN_SPEED_MIN = 80     # Minimum fan speed (never go below this for safety)
+                       # Note: Some fans stop at PWM 0, others at PWM 1 or 2
+                       # Use --test-fan to find your fan's stop value
 FAN_SPEED_MAX = 255    # Maximum fan speed
 
 # Control behavior
@@ -496,6 +498,49 @@ def show_status():
     else:
         print("PWM Path: Not found")
 
+def find_fan_stop_value(pwm_path):
+    """
+    Programmatically find the PWM value where the fan stops.
+    Returns the stop value, or None if couldn't determine.
+    """
+    if not pwm_path or not os.path.exists(pwm_path):
+        return None
+        
+    pwm_name = os.path.basename(pwm_path)
+    fan_input = os.path.join(os.path.dirname(pwm_path), 
+                            pwm_name.replace('pwm', 'fan') + '_input')
+    
+    # Only works if we have a fan speed sensor
+    if not os.path.exists(fan_input):
+        logger.debug("No fan speed sensor available for automatic stop detection")
+        return None
+    
+    # Store original PWM value
+    original_pwm = read_pwm_value(pwm_path)
+    if original_pwm is None:
+        return None
+    
+    try:
+        # Test different stop values
+        for stop_val in [0, 1, 2, 3]:
+            logger.debug(f"Testing fan stop at PWM {stop_val}")
+            
+            if write_pwm_value(pwm_path, stop_val):
+                time.sleep(2)  # Wait for fan to respond
+                
+                fan_speed = read_fan_speed(fan_input)
+                if fan_speed is not None and fan_speed == 0:
+                    logger.debug(f"Fan stops at PWM {stop_val}")
+                    return stop_val
+        
+        logger.debug("Could not find fan stop value")
+        return None
+        
+    finally:
+        # Always restore original value
+        if original_pwm is not None:
+            write_pwm_value(pwm_path, original_pwm)
+
 def configure_pwm_path():
     """
     Interactive helper to find and configure the correct PWM path.
@@ -577,32 +622,67 @@ def configure_pwm_path():
         
         if current_status == 'y':
             # Fan is running, try to stop it
-            print("Setting PWM to 0 to stop the fan...")
-            try:
-                with open(path, 'w') as f:
-                    f.write('0')
-                
-                print("Waiting 3 seconds for fan to stop...")
-                time.sleep(3)
-                
-                stopped = input("Did the fan stop? (y/n): ").lower().strip()
-                
-                if stopped == 'y':
-                    print("✓ This PWM controls your fan!")
-                    working_pwm = path
-                    
-                    # Restore original value and break
-                    print("Restoring original fan speed...")
+            print("Attempting to stop the fan...")
+            
+            # Try different PWM values to stop the fan (0, 1, 2)
+            # Different fans have different minimum stop values
+            stop_values = [0, 1, 2]
+            fan_stopped = False
+            
+            for stop_val in stop_values:
+                print(f"Setting PWM to {stop_val}...")
+                try:
                     with open(path, 'w') as f:
-                        f.write(str(original_pwm))
-                    break
-                else:
-                    print("✗ This PWM doesn't control your fan.")
+                        f.write(str(stop_val))
                     
-            except Exception as e:
-                print(f"Error testing PWM: {e}")
-            finally:
-                # Always restore original value
+                    print("Waiting 3 seconds for fan response...")
+                    time.sleep(3)
+                    
+                    # Check fan speed sensor if available
+                    if os.path.exists(fan_input):
+                        try:
+                            with open(fan_input, 'r') as f:
+                                test_fan_speed = int(f.read().strip())
+                            if test_fan_speed == 0:
+                                print(f"✓ Fan stopped at PWM {stop_val} (sensor shows 0 RPM)")
+                                fan_stopped = True
+                                break
+                            else:
+                                print(f"Fan still running at {test_fan_speed} RPM")
+                        except:
+                            pass
+                    
+                    # Ask user if fan stopped (in case sensor doesn't work)
+                    stopped = input(f"Did the fan stop at PWM {stop_val}? (y/n): ").lower().strip()
+                    if stopped == 'y':
+                        print(f"✓ Fan stops at PWM {stop_val}")
+                        fan_stopped = True
+                        break
+                    
+                except Exception as e:
+                    print(f"Error setting PWM to {stop_val}: {e}")
+            
+            if fan_stopped:
+                print("✓ This PWM controls your fan!")
+                
+                # Try to automatically detect the stop value
+                print("Analyzing fan stop behavior...")
+                auto_stop_val = find_fan_stop_value(path)
+                if auto_stop_val is not None:
+                    print(f"✓ Auto-detected: Your fan stops at PWM {auto_stop_val}")
+                    recommended_min = max(auto_stop_val + 10, 20)
+                    print(f"✓ Recommended FAN_SPEED_MIN: {recommended_min}")
+                
+                working_pwm = path
+                
+                # Restore original value and break
+                print("Restoring original fan speed...")
+                with open(path, 'w') as f:
+                    f.write(str(original_pwm))
+                break
+            else:
+                print("✗ Could not stop fan with this PWM (tried values 0, 1, 2).")
+                # Restore original value
                 try:
                     with open(path, 'w') as f:
                         f.write(str(original_pwm))
@@ -786,7 +866,7 @@ def test_fan_control(pwm_path_override=None):
         original_speed = 128  # Default fallback
     
     # Test different speeds
-    test_speeds = [FAN_SPEED_MIN, FAN_SPEED_MIN + 50, FAN_SPEED_MIN + 100, FAN_SPEED_MAX, original_speed]
+    test_speeds = [FAN_SPEED_MIN, FAN_SPEED_MIN + 50, FAN_SPEED_MIN + 100, FAN_SPEED_MAX]
     
     for speed in test_speeds:
         print(f"Setting fan speed to {speed}...")
@@ -794,7 +874,27 @@ def test_fan_control(pwm_path_override=None):
             time.sleep(3)  # Wait 3 seconds between changes to hear the difference
         else:
             print(f"Failed to set speed {speed}")
+            return
+    
+    # Add a final test to demonstrate fan stopping
+    print(f"\nTesting fan stop capability...")
+    stop_values = [0, 1, 2]
+    for stop_val in stop_values:
+        print(f"Testing PWM {stop_val} (fan should stop)...")
+        if set_fan_speed(stop_val, fan_control_path):
+            time.sleep(3)
+            stopped = input(f"Did fan stop at PWM {stop_val}? (y/n): ").lower().strip()
+            if stopped == 'y':
+                print(f"✓ Your fan stops at PWM {stop_val}")
+                print(f"Note: You may want to set FAN_SPEED_MIN to {max(stop_val + 5, 10)} in the script")
+                break
+        else:
+            print(f"Failed to set PWM to {stop_val}")
             break
+    
+    # Restore original speed
+    print(f"Restoring original fan speed ({original_speed})...")
+    set_fan_speed(original_speed, fan_control_path)
     
     print("Fan test complete!")
 

@@ -156,6 +156,15 @@ FAN_SPEED_MIN = 80     # Minimum fan speed (safety)
 FAN_SPEED_MAX = 255    # Maximum fan speed
 ```
 
+### Fan PWM Behavior Notes
+
+Different fans have different PWM stop values:
+- **Most fans**: Stop at PWM 0
+- **Some fans (e.g., Noctua)**: Stop at PWM 1 or 2
+- **Server fans**: May require higher minimum values
+
+Use `sudo ./fan-control.py --test-fan` to discover your fan's behavior and adjust `FAN_SPEED_MIN` accordingly. The test will show you the exact PWM value where your fan stops.
+
 ## Running as a Service
 
 ### Automatic Installation (Recommended)
@@ -304,6 +313,21 @@ sudo systemctl daemon-reload
 1. Check if it87 kernel module is loaded: `lsmod | grep it87`
 2. Load the module: `sudo modprobe it87`
 3. Run interactive configuration: `sudo ./fan-control.py --configure`
+4. Test fan behavior: `sudo ./fan-control.py --test-fan`
+
+### Fan Behavior Issues
+- **Fan won't stop**: Some fans (like Noctua) stop at PWM 1 instead of 0
+- **Fan minimum speed too low**: Adjust `FAN_SPEED_MIN` based on your fan's characteristics
+- **Fan stuttering**: Usually caused by PWM value too close to fan's stop threshold
+
+**Finding your fan's stop value:**
+```bash
+# Test manually (replace hwmon3/pwm2 with your path)
+echo "0" > /sys/class/hwmon/hwmon3/pwm2  # Try 0
+echo "1" > /sys/class/hwmon/hwmon3/pwm2  # Try 1  
+echo "2" > /sys/class/hwmon/hwmon3/pwm2  # Try 2
+# Use the lowest value where fan completely stops
+```
 
 ### Permissions Issues
 - Fan control requires root privileges
